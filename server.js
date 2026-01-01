@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const http = require("http");
 require("dotenv").config();
 
-const authRoutes = require("./routes/Auth.js");
+const authRoutes = require("./routes/auth.js");
 const Device = require("./models/Device");
 const SavedMessage = require("./models/SavedMessage");
 
