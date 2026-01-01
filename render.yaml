@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: secure-chat-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: PORT
+        value: 5000
+      - key: NODE_VERSION
+        value: 20.17.0

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Secure Chat – Encrypted Test Client</title>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+
+    .container {
+      display: flex;
+      justify-content: space-between;
+      gap: 40px;
+    }
+
+    .box {
+      width: 45%;
+      border: 1px solid #ccc;
+      padding: 15px;
+      border-radius: 6px;
+    }
+
+    input {
+      padding: 6px;
+      margin: 4px 0;
+      width: 95%;
+    }
+
+    button {
+      padding: 6px 12px;
+      margin: 4px 2px;
+    }
+
+    .messages {
+      margin-top: 30px;
+      text-align: center;
+    }
+
+    ul {
+      list-style: none;
+      padding: 0;
+      max-width: 600px;
+      margin: auto;
+    }
+
+    li {
+      margin-bottom: 6px;
+      padding: 6px;
+      background: #f2f2f2;
+      border-radius: 4px;
+    }
+
+    .info {
+      font-size: 14px;
+      color: #555;
+      margin-bottom: 15px;
+    }
+    .info22 {
+      font-size: 14px;
+      color: #555;
+      margin-bottom: 15px;
+    }
+
+    footer {
+      margin-top: 40px;
+      text-align: center;
+      font-size: 14px;
+      color: #444;
+    }
+  </style>
+</head>
+
+<body>
+
+<h2>Secure Chat – Encrypted Test Client</h2>
+
+<p class="info">
+  Device ID is generated automatically.  
+  Private messages are end-to-end encrypted (E2EE).
+</p>
+
+<p><b>Your Device ID:</b> <span id="myDeviceId"></span></p>
+
+<div class="container">
+
+  <!-- PRIVATE CHAT -->
+  <div class="box">
+    <h3>Private Chat</h3>
+    <input id="toDeviceId" placeholder="Target Device ID" />
+    <input id="privateMsg" placeholder="Type private message" />
+    <button onclick="sendPrivateMessage()">Send Private Message</button>
+  </div>
+
+  <!-- GROUP CHAT -->
+  <div class="box">
+    <h3>Group Chat</h3>
+    <input id="groupId" placeholder="Group ID" />
+    <input id="groupMsg" placeholder="Type group message" />
+    <br />
+    <button onclick="createGroup()">Create Group</button>
+    <button onclick="joinGroup()">Join Group</button>
+    <button onclick="sendGroupMessage()">Send Group Message</button>
+  </div>
+
+</div>
+
+<!-- MESSAGES -->
+<div class="messages">
+  <h3>Messages</h3>
+  <ul id="messages"></ul>
+
+  <h3>Saved Messages</h3>
+  <button onclick="loadSavedMessages()">Load Saved Messages</button>
+  <ul id="savedMessages"></ul>
+</div>
+
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+  /* ================= DEVICE ID ================= */
+  function getDeviceId() {
+    let id = localStorage.getItem("deviceId");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("deviceId", id);
+    }
+    return id;
+  }
+
+  const deviceId = getDeviceId();
+  document.getElementById("myDeviceId").innerText = deviceId;
+
+  /* ================= CRYPTO ================= */
+  let myKeyPair;
+  const publicKeyStore = {};
+  const joinedGroups = new Set();
+
+  async function generateKeyPair() {
+    return crypto.subtle.generateKey(
+      {
+        name: "RSA-OAEP",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256"
+      },
+      true,
+      ["encrypt", "decrypt"]
+    );
+  }
+
+  async function exportPublicKey(key) {
+    const spki = await crypto.subtle.exportKey("spki", key);
+    return btoa(String.fromCharCode(...new Uint8Array(spki)));
+  }
+
+  async function importPublicKey(str) {
+    const data = Uint8Array.from(atob(str), c => c.charCodeAt(0));
+    return crypto.subtle.importKey(
+      "spki",
+      data,
+      { name: "RSA-OAEP", hash: "SHA-256" },
+      true,
+      ["encrypt"]
+    );
+  }
+
+  async function encryptMessage(publicKey, text) {
+    const encoded = new TextEncoder().encode(text);
+    const encrypted = await crypto.subtle.encrypt(
+      { name: "RSA-OAEP" },
+      publicKey,
+      encoded
+    );
+    return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+  }
+
+  async function decryptMessage(privateKey, encryptedText) {
+    const binary = Uint8Array.from(atob(encryptedText), c => c.charCodeAt(0));
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "RSA-OAEP" },
+      privateKey,
+      binary
+    );
+    return new TextDecoder().decode(decrypted);
+  }
+
+  /* ================= SOCKET ================= */
+  const socket = io("http://localhost:5000");
+
+  socket.on("connect", async () => {
+    myKeyPair = await generateKeyPair();
+    const publicKey = await exportPublicKey(myKeyPair.publicKey);
+
+    socket.emit("register_device", { deviceId, publicKey });
+  });
+
+  socket.on("public_key", ({ deviceId, publicKey }) => {
+    publicKeyStore[deviceId] = publicKey;
+  });
+
+  /* ================= PRIVATE CHAT ================= */
+  async function sendPrivateMessage() {
+    const toId = toDeviceId.value;
+    const text = privateMsg.value;
+    if (!toId || !text) return alert("Missing fields");
+
+    const pubKey = await importPublicKey(publicKeyStore[toId]);
+    const encryptedText = await encryptMessage(pubKey, text);
+
+    socket.emit("private_message", { toDeviceId: toId, encryptedText });
+
+    addMessage(
+      "You → " + toId + ": " + text,
+      {
+        fromDeviceId: deviceId,
+        toDeviceId: toId,
+        encryptedText,
+        isGroup: false
+      }
+    );
+
+    privateMsg.value = "";
+  }
+
+  socket.on("receive_private_message", async (data) => {
+    const text = await decryptMessage(myKeyPair.privateKey, data.encryptedText);
+
+    addMessage(
+      data.from + " → You: " + text,
+      {
+        fromDeviceId: data.from,
+        toDeviceId: deviceId,
+        encryptedText: data.encryptedText,
+        isGroup: false
+      }
+    );
+  });
+
+  /* ================= GROUP CHAT ================= */
+  function createGroup() {
+    const gid = groupId.value;
+    if (!gid) return alert("Enter group ID");
+    socket.emit("create_group", { groupId: gid });
+    joinedGroups.add(gid);
+    addMessage("You created & joined group: " + gid);
+  }
+
+  function joinGroup() {
+    const gid = groupId.value;
+    if (!gid) return alert("Enter group ID");
+    socket.emit("join_group", { groupId: gid });
+    joinedGroups.add(gid);
+    addMessage("You joined group: " + gid);
+  }
+
+  function sendGroupMessage() {
+    const gid = groupId.value;
+    const text = groupMsg.value;
+    if (!gid || !text) return alert("Missing fields");
+
+    socket.emit("group_message", {
+      groupId: gid,
+      encryptedText: text
+    });
+
+    addMessage(
+      "You (Group " + gid + "): " + text,
+      {
+        fromDeviceId: deviceId,
+        groupId: gid,
+        encryptedText: text,
+        isGroup: true
+      }
+    );
+
+    groupMsg.value = "";
+  }
+
+  socket.on("receive_group_message", (data) => {
+    addMessage(
+      "Group " + data.groupId + " | " + data.from + ": " + data.encryptedText,
+      {
+        fromDeviceId: data.from,
+        groupId: data.groupId,
+        encryptedText: data.encryptedText,
+        isGroup: true
+      }
+    );
+  });
+
+  /* ================= SAVED MESSAGES ================= */
+  function loadSavedMessages() {
+    socket.emit("get_saved_messages");
+  }
+
+  socket.on("saved_messages", (msgs) => {
+  savedMessages.innerHTML = "";
+
+  for (const m of msgs) {
+    const li = document.createElement("li");
+
+    // ✅ Saved messages shown as plain text (no decryption)
+    li.innerText = "[Saved] " + m.encryptedText;
+
+    savedMessages.appendChild(li);
+  }
+});
+
+
+  /* ================= HELPER ================= */
+  function addMessage(text, saveData) {
+    const li = document.createElement("li");
+    li.innerText = text;
+
+    if (saveData) {
+      const btn = document.createElement("button");
+      btn.innerText = "Save";
+      btn.onclick = () => {
+        socket.emit("save_message", saveData);
+        alert("Message saved");
+      };
+      li.appendChild(document.createTextNode(" "));
+      li.appendChild(btn);
+    }
+
+    messages.appendChild(li);
+  }
+</script>
+
+<p><p>
+Note: End-to-end encryption is applied only to live private messaging.
+Saved messages are stored intentionally in readable form for user convenience
+and demonstration purposes. The server still does not modify or interpret
+message content.
+</p>
+</p>
+
+<p class="info22">
+<b>Concept:</b><br>
+This application demonstrates secure device-based communication where users are identified
+by device IDs instead of phone numbers. Communication relies on active socket connections
+(similar to IP-based presence). The server acts only as a router and never accesses message
+content, ensuring privacy and security.
+</p>
+
+
+
+<p class="info22">
+<b>Process Overview:</b><br><br>
+1. Each device generates a unique Device ID automatically on first load.<br>
+2. A public-private key pair is generated in the browser.<br>
+3. Public keys are shared through the server, private keys never leave the device.<br>
+4. Private messages are encrypted using the receiver’s public key.<br>
+5. The server only routes encrypted data and never reads messages.<br>
+6. Messages are decrypted only on the receiver’s device.<br>
+7. Messages are stored in the database only if the user explicitly saves them.<br>
+8. Saved messages remain encrypted on the server and are decrypted locally.
+</p>
+
+</body>
+
+<footer>
+  <b>Designed by Deepak Reddy Yaramala</b><br><br>
+  🔗 GitHub &nbsp; | &nbsp; 💼 LinkedIn &nbsp; | &nbsp; ✉️ Email
+</footer>
+</html>

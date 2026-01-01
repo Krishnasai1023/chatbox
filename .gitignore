@@ -1,0 +1,6 @@
+node_modules/
+.env
+.azure/
+infra/
+*.log
+.DS_Store

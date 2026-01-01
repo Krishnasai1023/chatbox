@@ -1,0 +1,6 @@
+name: secure-chat-app
+services:
+  web:
+    project: .
+    language: js
+    host: appservice
